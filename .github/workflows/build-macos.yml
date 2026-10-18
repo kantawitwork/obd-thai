@@ -1,0 +1,38 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+
+      - name: Create macos folder
+        run: flutter create . --project-name obd_thai --org com.example --platforms=macos
+
+      - name: Add Bluetooth and network permissions
+        run: python3 tools/patch_macos.py
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build app
+        run: flutter build macos --release
+
+      - name: Zip app
+        run: ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/obd_thai.app obd_thai_mac.zip
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: obd-thai-mac
+          path: obd_thai_mac.zip
