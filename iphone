@@ -1,0 +1,48 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Create ios folder
+        run: flutter create . --project-name obd_thai --org com.example --platforms=ios
+
+      - name: Add Bluetooth permissions
+        run: |
+          python3 - <<'EOF'
+          import plistlib
+          path = "ios/Runner/Info.plist"
+          with open(path, "rb") as f:
+              d = plistlib.load(f)
+          d["NSBluetoothAlwaysUsageDescription"] = "Connect to the OBD2 scanner"
+          d["NSLocalNetworkUsageDescription"] = "Connect to the Wi-Fi OBD2 scanner"
+          with open(path, "wb") as f:
+              plistlib.dump(d, f)
+          EOF
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build app
+        run: flutter build ios --release --no-codesign
+
+      - name: Make IPA
+        run: |
+          mkdir Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -r obd_thai.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: obd-thai-ipa
+          path: obd_thai.ipa
