@@ -1,0 +1,39 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: สร้างโฟลเดอร์ android ของโปรเจกต์
+        run: flutter create . --project-name obd_thai --org com.example --platforms=android
+
+      - name: เพิ่มสิทธิ์ Bluetooth ให้แอป
+        run: python3 tools/patch_android.py
+
+      - name: ติดตั้งแพ็กเกจ
+        run: flutter pub get
+
+      - name: สร้างไฟล์ติดตั้ง (APK)
+        run: flutter build apk --release
+
+      - name: เก็บไฟล์ APK ให้ดาวน์โหลด
+        uses: actions/upload-artifact@v4
+        with:
+          name: obd-thai-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
