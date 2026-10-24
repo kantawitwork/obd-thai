@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'scan_report.dart';
 import 'transport.dart';
 
 class ObdException implements Exception {
@@ -175,13 +176,14 @@ class Elm327 {
     return '$p$d1$rest'.toUpperCase();
   }
 
-  /// แปลงคำตอบ Mode 03 เป็นรหัสโค้ด เช่น P0301
-  /// บน CAN คำตอบเป็น 43 <จำนวนโค้ด> <คู่ไบต์ DTC...>
-  /// บนโปรโตคอลเก่า คำตอบเป็น 43 <คู่ไบต์ DTC...> เติม 00 00 ให้ครบ
-  static List<String> parseDtcs(List<String> lines, {required bool isCan}) {
+  /// แปลงคำตอบ Mode 03/07/0A เป็นรหัสโค้ด เช่น P0301
+  /// [header] คือไบต์แรกของคำตอบ: 0x43 (โหมด 03), 0x47 (โหมด 07), 0x4A (โหมด 0A)
+  /// บน CAN คำตอบเป็น <header> <จำนวนโค้ด> <คู่ไบต์ DTC...>
+  /// บนโปรโตคอลเก่า คำตอบเป็น <header> <คู่ไบต์ DTC...> เติม 00 00 ให้ครบ
+  static List<String> parseDtcs(List<String> lines, {required bool isCan, int header = 0x43}) {
     final found = <String>[];
     for (final msg in messages(lines)) {
-      if (msg.isEmpty || msg[0] != 0x43) continue;
+      if (msg.isEmpty || msg[0] != header) continue;
       for (var i = isCan ? 2 : 1; i + 1 < msg.length; i += 2) {
         final a = msg[i];
         final b = msg[i + 1];
@@ -199,6 +201,152 @@ class Elm327 {
   Future<List<String>> readDtcs() async {
     final r = await send('03', timeout: const Duration(seconds: 10));
     return parseDtcs(r, isCan: isCan);
+  }
+
+  /// อ่านโค้ดตามโหมด (03 ค้างอยู่, 07 ยังไม่ยืนยัน, 0A ถาวร) พร้อมบอกว่ารถตอบหรือไม่
+  /// ถ้าโหมดใดรถไม่รองรับ (NO DATA) จะได้ answered = false แทนที่จะถือว่า "ไม่มีโค้ด"
+  Future<DtcResult> _readMode(String mode, int header) async {
+    try {
+      final r = await send(mode, timeout: const Duration(seconds: 10));
+      final answered = messages(r).any((m) => m.isNotEmpty && m[0] == header);
+      return DtcResult(codes: parseDtcs(r, isCan: isCan, header: header), answered: answered);
+    } on ObdException {
+      return const DtcResult(codes: [], answered: false);
+    }
+  }
+
+  /// Mode 01 PID 01: ไฟเตือน MIL, จำนวนโค้ด และสถานะระบบตรวจสอบ (Readiness)
+  Future<VehicleStatus?> readStatus() async {
+    final bytes = await _pid('01');
+    if (bytes == null || bytes.length < 4) return null;
+    return VehicleStatus.fromBytes(bytes);
+  }
+
+  /// Mode 09 PID 02: เลขตัวถัง (VIN) หลายรุ่นไม่รองรับ จะได้ null
+  Future<String?> readVin() async {
+    try {
+      final lines = await send('0902', timeout: const Duration(seconds: 8));
+      final bytes = <int>[];
+      for (final m in messages(lines)) {
+        // คำตอบ: 49 02 <ลำดับ> <ข้อมูล 4 ไบต์ ...>
+        if (m.length > 3 && m[0] == 0x49 && m[1] == 0x02) {
+          bytes.addAll(m.sublist(3));
+        } else if (m.length > 2 && m[0] == 0x49 && m[1] == 0x02) {
+          bytes.addAll(m.sublist(2));
+        }
+      }
+      final vin = String.fromCharCodes(bytes.where((b) => b >= 0x30 && b <= 0x5A))
+          .replaceAll(RegExp(r'[^A-Z0-9]'), '');
+      if (vin.length < 11) return null;
+      return vin.length > 17 ? vin.substring(vin.length - 17) : vin;
+    } on ObdException {
+      return null;
+    }
+  }
+
+  static String _printable(Iterable<int> bytes) =>
+      String.fromCharCodes(bytes.where((x) => x >= 0x20 && x <= 0x7E)).trim();
+
+  /// อ่านข้อความจาก Mode 09 (04 = รหัสซอฟต์แวร์, 0A = ชื่อ ECU)
+  /// บน CAN แต่ละ ECU ตอบแยกกัน จึงได้ข้อความหลายรายการ
+  Future<List<String>> _mode09Text(String pid) async {
+    try {
+      final lines = await send('09$pid', timeout: const Duration(seconds: 8));
+      final want = int.parse(pid, radix: 16);
+      final msgs = messages(lines)
+          .where((m) => m.length > 3 && m[0] == 0x49 && m[1] == want)
+          .toList();
+      if (isCan) {
+        return msgs.map((m) => _printable(m.sublist(3))).where((s) => s.isNotEmpty).toSet().toList();
+      }
+      final s = _printable(msgs.expand((m) => m.sublist(3)));
+      return s.isEmpty ? <String>[] : [s];
+    } on ObdException {
+      return <String>[];
+    }
+  }
+
+  /// UDS บริการ 22 (อ่านข้อมูลตามรหัส DID) รถหลายรุ่นไม่ตอบ จะได้ null
+  /// F190 = VIN, F187 = เลขชิ้นส่วน, F189 = เวอร์ชันซอฟต์แวร์, F18C = ซีเรียลของกล่อง ECU
+  Future<String?> _udsText(int did) async {
+    try {
+      final hex = did.toRadixString(16).toUpperCase().padLeft(4, '0');
+      final lines = await send('22$hex', timeout: const Duration(seconds: 6));
+      final hi = did >> 8;
+      final lo = did & 0xFF;
+      for (final m in messages(lines)) {
+        if (m.length > 3 && m[0] == 0x62 && m[1] == hi && m[2] == lo) {
+          final s = _printable(m.sublist(3));
+          if (s.isNotEmpty) return s;
+        }
+      }
+    } on ObdException {
+      // รถไม่ตอบ ถือว่าไม่รองรับ
+    }
+    return null;
+  }
+
+  int? _u16(List<int>? b) => (b != null && b.length >= 2) ? b[0] * 256 + b[1] : null;
+
+  /// อ่านข้อมูลรถและกล่อง ECU เท่าที่รถยอมตอบ (อ่านอย่างเดียว ไม่เขียนค่าใดๆ)
+  Future<VehicleInfo> readVehicleInfo() async {
+    var vin = await readVin();
+    if (vin == null) {
+      final u = await _udsText(0xF190);
+      if (u != null) {
+        final c = u.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+        if (c.length >= 11) vin = c;
+      }
+    }
+
+    final cal = await _mode09Text('04');
+    final names = await _mode09Text('0A');
+    final serial = await _udsText(0xF18C);
+    final part = await _udsText(0xF187);
+    final sw = await _udsText(0xF189);
+
+    int? kmMil, kmCleared, minCleared;
+    try {
+      kmMil = _u16(await _pid('21'));
+      kmCleared = _u16(await _pid('31'));
+      minCleared = _u16(await _pid('4E'));
+    } on ObdException {
+      // ข้ามค่าที่อ่านไม่ได้
+    }
+
+    return VehicleInfo(
+      vin: vin,
+      calibrationIds: cal,
+      ecuNames: names,
+      ecuSerial: serial,
+      partNumber: part,
+      softwareVersion: sw,
+      kmWithMil: kmMil,
+      kmSinceCleared: kmCleared,
+      minutesSinceCleared: minCleared,
+    );
+  }
+
+  /// สแกนครบทุกอย่างในครั้งเดียว
+  Future<ScanReport> fullScan() async {
+    final stored = await _readMode('03', 0x43);
+    final pending = await _readMode('07', 0x47);
+    final permanent = await _readMode('0A', 0x4A);
+    VehicleStatus? status;
+    try {
+      status = await readStatus();
+    } on ObdException {
+      status = null;
+    }
+    final vin = await readVin();
+    return ScanReport(
+      time: DateTime.now(),
+      stored: stored,
+      pending: pending,
+      permanent: permanent,
+      status: status,
+      vin: vin,
+    );
   }
 
   /// Mode 04: ล้างโค้ดและ Freeze frame (รถตอบ 44 เมื่อสำเร็จ)

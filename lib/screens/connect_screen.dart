@@ -175,7 +175,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
           ),
           if (_connecting)
             Container(
-              color: Colors.black.withOpacity(0.7),
+              color: Colors.black.withValues(alpha: 0.7),
               alignment: Alignment.center,
               child: const Column(
                 mainAxisSize: MainAxisSize.min,

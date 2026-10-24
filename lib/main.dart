@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'screens/connect_screen.dart';
 
@@ -14,6 +15,13 @@ class ObdApp extends StatelessWidget {
     return MaterialApp(
       title: 'เช็คโค้ดรถ OBD2',
       debugShowCheckedModeBanner: false,
+      locale: const Locale('th'),
+      supportedLocales: const [Locale('th'), Locale('en')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       themeMode: ThemeMode.dark,
       theme: ThemeData(
         useMaterial3: true,
